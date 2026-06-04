@@ -20,7 +20,7 @@ def load_aws_secret_env() -> None:
     secret_values = json.loads(secret_string)
     for key, value in secret_values.items():
         if value is not None and key not in os.environ:
-            os.environ[key] = str(value)
+            os.environ[key] = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
 
 
 class Settings(BaseSettings):
