@@ -60,7 +60,7 @@ jobs:
 
       - name: Create Elastic Beanstalk application version
         run: |
-          VERSION_LABEL="backend-${GITHUB_SHA}"
+          VERSION_LABEL="backend-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           aws elasticbeanstalk create-application-version \
             --application-name "$EB_APPLICATION_NAME" \
@@ -69,7 +69,7 @@ jobs:
 
       - name: Deploy application version
         run: |
-          VERSION_LABEL="backend-${GITHUB_SHA}"
+          VERSION_LABEL="backend-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           aws elasticbeanstalk update-environment \
             --environment-name "$EB_ENVIRONMENT_NAME" \
