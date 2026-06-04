@@ -1,4 +1,26 @@
+import json
+import os
+
 from pydantic_settings import BaseSettings
+
+
+def load_aws_secret_env() -> None:
+    secret_name = os.getenv("AWS_BACKEND_ENV_SECRET_NAME")
+    if not secret_name:
+        return
+
+    import boto3
+
+    client = boto3.client("secretsmanager", region_name=os.getenv("AWS_REGION"))
+    response = client.get_secret_value(SecretId=secret_name)
+    secret_string = response.get("SecretString")
+    if not secret_string:
+        return
+
+    secret_values = json.loads(secret_string)
+    for key, value in secret_values.items():
+        if value is not None and key not in os.environ:
+            os.environ[key] = str(value)
 
 
 class Settings(BaseSettings):
@@ -19,4 +41,5 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env"}
 
 
+load_aws_secret_env()
 settings = Settings()

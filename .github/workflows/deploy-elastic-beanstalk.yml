@@ -1,0 +1,81 @@
+name: Deploy Backend to Elastic Beanstalk
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  EB_APPLICATION_NAME: roundready-backend
+  EB_ENVIRONMENT_NAME: roundready-backend-prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create deployment bundle
+        run: |
+          zip -r deploy.zip . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x ".env" \
+            -x "venv/*" \
+            -x "__pycache__/*" \
+            -x "app/**/__pycache__/*" \
+            -x "tests/*" \
+            -x "interview_bot.db" \
+            -x "*firebase-adminsdk*.json"
+
+      - name: Upload bundle to Elastic Beanstalk S3 bucket
+        id: upload
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="elasticbeanstalk-${AWS_REGION}-${ACCOUNT_ID}"
+          KEY="roundready-backend/${GITHUB_SHA}.zip"
+
+          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            aws s3api create-bucket \
+              --bucket "$BUCKET" \
+              --region "$AWS_REGION" \
+              --create-bucket-configuration LocationConstraint="$AWS_REGION"
+          fi
+
+          aws s3 cp deploy.zip "s3://${BUCKET}/${KEY}"
+
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Elastic Beanstalk application version
+        run: |
+          VERSION_LABEL="backend-${GITHUB_SHA}"
+
+          aws elasticbeanstalk create-application-version \
+            --application-name "$EB_APPLICATION_NAME" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket="${{ steps.upload.outputs.bucket }}",S3Key="${{ steps.upload.outputs.key }}"
+
+      - name: Deploy application version
+        run: |
+          VERSION_LABEL="backend-${GITHUB_SHA}"
+
+          aws elasticbeanstalk update-environment \
+            --environment-name "$EB_ENVIRONMENT_NAME" \
+            --version-label "$VERSION_LABEL"
+
+      - name: Wait for environment update
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-names "$EB_ENVIRONMENT_NAME"
