@@ -20,6 +20,88 @@ from app.config import settings
 router = APIRouter(prefix="/api/interview", tags=["interview"])
 
 
+def _voice_agent_payload(interview: Interview, bot_token: str, room_url: str) -> dict:
+    return {
+        "room_url": room_url,
+        "bot_token": bot_token,
+        "interview_id": interview.id,
+        "interview_plan": interview.interview_plan,
+        "resume_text": interview.resume_text,
+        "job_description": interview.job_description,
+        "company_info": interview.company_info,
+        "role_type": interview.role_type,
+        "level": interview.level,
+        "years_of_experience": interview.years_of_experience,
+        "employment_type": interview.employment_type,
+    }
+
+
+async def _start_voice_agent(interview: Interview, bot_token: str, room_url: str) -> str | None:
+    payload = _voice_agent_payload(interview, bot_token, room_url)
+
+    if settings.voice_agent_provider == "pipecat_cloud":
+        if not settings.pipecat_api_key:
+            raise ValueError("PIPECAT_API_KEY is not configured")
+
+        url = (
+            f"{settings.pipecat_api_base_url.rstrip('/')}/v1/public/"
+            f"{settings.pipecat_agent_name}/start"
+        )
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {settings.pipecat_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "createDailyRoom": False,
+                    "transport": "daily",
+                    "body": payload,
+                },
+            )
+            if not res.is_success:
+                raise ValueError(f"Pipecat Cloud returned {res.status_code}: {res.text}")
+
+        response = res.json()
+        session_id = response.get("sessionId")
+        logger.info(
+            f"Pipecat Cloud agent started for interview {interview.id}; "
+            f"session_id={session_id}"
+        )
+        return session_id
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        res = await client.post(f"{settings.voice_agent_url}/start-bot", json=payload)
+        if not res.is_success:
+            raise ValueError(f"Voice agent returned {res.status_code}: {res.text}")
+    return None
+
+
+async def _stop_voice_agent(interview: Interview) -> None:
+    if settings.voice_agent_provider == "pipecat_cloud":
+        if not interview.pipecat_session_id:
+            return
+        if not settings.pipecat_private_api_key:
+            logger.warning("PIPECAT_PRIVATE_API_KEY is not configured; cannot stop Pipecat session")
+            return
+        url = (
+            f"{settings.pipecat_api_base_url.rstrip('/')}/v1/agents/"
+            f"{settings.pipecat_agent_name}/sessions/{interview.pipecat_session_id}"
+        )
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.delete(
+                url,
+                headers={"Authorization": f"Bearer {settings.pipecat_private_api_key}"},
+            )
+            if res.status_code not in (200, 404):
+                raise ValueError(f"Pipecat Cloud stop returned {res.status_code}: {res.text}")
+        return
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(f"{settings.voice_agent_url}/stop-bot/{interview.id}")
+
+
 @router.get("s")
 async def list_interviews(
     current_user: User = Depends(get_current_user),
@@ -220,11 +302,10 @@ async def start_interview(
     # Reset status so we can restart
     if interview.status == "in_progress":
         # Stop old bot if running
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                await client.post(f"{settings.voice_agent_url}/stop-bot/{interview_id}")
-            except Exception:
-                pass
+        try:
+            await _stop_voice_agent(interview)
+        except Exception:
+            pass
         interview.status = "planned"
         await db.commit()
 
@@ -239,30 +320,16 @@ async def start_interview(
 
     # Update interview
     interview.daily_room_url = room["url"]
+    interview.pipecat_session_id = None
     interview.status = "in_progress"
     await db.commit()
 
     # Call voice agent server to start the bot
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.post(
-                f"{settings.voice_agent_url}/start-bot",
-                json={
-                    "room_url": room["url"],
-                    "bot_token": bot_token,
-                    "interview_id": interview_id,
-                    "interview_plan": interview.interview_plan,
-                    "resume_text": interview.resume_text,
-                    "job_description": interview.job_description,
-                    "company_info": interview.company_info,
-                    "role_type": interview.role_type,
-                    "level": interview.level,
-                    "years_of_experience": interview.years_of_experience,
-                    "employment_type": interview.employment_type,
-                },
-            )
-            if not res.is_success:
-                raise ValueError(f"Voice agent returned {res.status_code}: {res.text}")
+        session_id = await _start_voice_agent(interview, bot_token, room["url"])
+        if session_id:
+            interview.pipecat_session_id = session_id
+            await db.commit()
         logger.info(f"Voice agent started for interview {interview_id}")
     except Exception as e:
         logger.error(f"Failed to start voice agent: {e}")
@@ -282,12 +349,6 @@ async def end_interview(
     db: AsyncSession = Depends(get_db),
 ):
     # Stop the bot via voice agent server
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            await client.post(f"{settings.voice_agent_url}/stop-bot/{interview_id}")
-        except Exception:
-            pass
-
     result = await db.execute(
         select(Interview).where(
             Interview.id == interview_id,
@@ -297,6 +358,11 @@ async def end_interview(
     interview = result.scalar_one_or_none()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
+
+    try:
+        await _stop_voice_agent(interview)
+    except Exception:
+        pass
 
     interview.status = "completed"
     await db.commit()
@@ -401,6 +467,8 @@ async def bot_callback(
 
     body = await request.json()
     transcript = body.get("transcript", [])
+    callback_status = body.get("status")
+    error = body.get("error")
 
     async with async_session() as session:
         result = await session.execute(
@@ -411,12 +479,15 @@ async def bot_callback(
             raise HTTPException(status_code=404, detail="Interview not found")
 
         iv.transcript = transcript
-        iv.status = "completed"
+        iv.status = "failed" if callback_status == "failed" and not transcript else "completed"
         await session.commit()
         logger.info(f"Bot callback: interview {interview_id} completed with {len(transcript)} entries")
 
     # Run evaluation after responding so the voice agent callback does not time out.
-    asyncio.create_task(_run_evaluation_safely(interview_id))
+    if transcript:
+        asyncio.create_task(_run_evaluation_safely(interview_id))
+    elif error:
+        logger.warning(f"Bot callback for {interview_id} had no transcript: {error}")
 
     return {"status": "ok"}
 

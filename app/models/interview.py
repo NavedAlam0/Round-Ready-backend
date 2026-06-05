@@ -23,6 +23,7 @@ class Interview(Base):
     transcript: Mapped[list | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String, default="setup")  # setup, planned, in_progress, completed
     daily_room_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    pipecat_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -24,12 +24,21 @@ async def _prefetch_google_keys():
         pass
 
 
+async def _ensure_schema_columns():
+    """Apply small additive schema updates for deployments without migrations."""
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(
+            "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS pipecat_session_id VARCHAR"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
     # Create all tables on startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _ensure_schema_columns()
     # Pre-fetch Google keys in background (don't block startup)
     asyncio.create_task(_prefetch_google_keys())
     yield

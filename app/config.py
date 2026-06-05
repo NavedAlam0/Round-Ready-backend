@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     force_ipv4_http: bool = True
     cors_origins: str = "http://localhost:3000,https://roundready.in,https://www.roundready.in"
     voice_agent_url: str = "http://localhost:8001"
+    voice_agent_provider: str = "local"
+    pipecat_api_key: str = ""
+    pipecat_private_api_key: str = ""
+    pipecat_agent_name: str = "roundready-voice"
+    pipecat_api_base_url: str = "https://api.pipecat.daily.co"
 
     model_config = {"env_file": ".env"}
 
