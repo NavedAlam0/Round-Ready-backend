@@ -14,7 +14,7 @@ from loguru import logger
 from app.config import settings
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import UserResponse
+from app.schemas.user import UserResponse, UserPreferencesResponse, UserPreferencesUpdate
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -85,3 +85,42 @@ async def get_current_user(
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.get("/me/preferences", response_model=UserPreferencesResponse)
+async def get_preferences(current_user: User = Depends(get_current_user)):
+    return UserPreferencesResponse(
+        resume_text=current_user.resume_text,
+        resume_file_name=current_user.resume_file_name,
+        role_type=current_user.role_type,
+        level=current_user.level,
+        years_of_experience=current_user.years_of_experience,
+        employment_type=current_user.employment_type,
+    )
+
+
+@router.put("/me/preferences", response_model=UserPreferencesResponse)
+async def update_preferences(
+    data: UserPreferencesUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if data.role_type is not None:
+        current_user.role_type = data.role_type
+    if data.level is not None:
+        current_user.level = data.level
+    if data.years_of_experience is not None:
+        current_user.years_of_experience = data.years_of_experience
+    if data.employment_type is not None:
+        current_user.employment_type = data.employment_type
+    db.add(current_user)
+    await db.commit()
+    await db.refresh(current_user)
+    return UserPreferencesResponse(
+        resume_text=current_user.resume_text,
+        resume_file_name=current_user.resume_file_name,
+        role_type=current_user.role_type,
+        level=current_user.level,
+        years_of_experience=current_user.years_of_experience,
+        employment_type=current_user.employment_type,
+    )

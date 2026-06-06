@@ -9,7 +9,8 @@ SYSTEM_PROMPT = """You are a senior technical interviewer and evaluation expert.
 You will receive:
 1. The interview transcript (conversation between interviewer and candidate)
 2. The interview plan (what questions were planned)
-3. The candidate's resume (for context)
+
+CRITICAL RULE: You must evaluate the candidate ONLY based on what they actually said in the transcript. Do NOT infer knowledge or skills from any other source. If the candidate did not answer a question or barely spoke, score them accordingly — do not assume they know something just because it might be on their resume. Your evaluation must be 100% grounded in the transcript.
 
 ## Evaluation Criteria
 Score each of these dimensions from 1-10:
@@ -86,15 +87,14 @@ Important:
 - Provide actionable recommendations the candidate can use to improve
 - For question_answers, include ALL distinct questions from the transcript (skip greetings and small talk)
 - CRITICAL: When extracting candidate_answer, read the FULL transcript carefully. The candidate's response to a question may span MULTIPLE transcript entries (the transcript is split by speech segments, not by question boundaries). Combine all candidate entries that follow a question until the next interviewer entry. NEVER say "No response was recorded" if the candidate spoke after the question — even if their response was brief, fragmented, or split across entries. Summarize what they actually said.
-- Model answers should be 3-5 sentences, specific to the candidate's actual experience, and demonstrate best practices (STAR method for behavioral questions, structured thinking for technical questions)
-- For skill_assessment, evaluate EVERY technical skill that was tested during the interview. Look at the resume to identify which skills were discussed, then assess proficiency based on what the candidate demonstrated in their answers. Include skills where the candidate showed strength AND where they showed gaps.
+- Model answers should be 3-5 sentences, demonstrate best practices (STAR method for behavioral questions, structured thinking for technical questions)
+- For skill_assessment, evaluate ONLY the technical skills that were actually discussed and tested during the interview. Assess proficiency based on what the candidate demonstrated in their answers. Do NOT assess skills that were not discussed in the transcript.
 - Respond ONLY with the JSON, no other text."""
 
 
 async def evaluate_interview(
     transcript: list[dict],
     interview_plan: dict,
-    resume_text: str,
 ) -> dict:
     """Send transcript to Claude for evaluation. Returns structured feedback."""
 
@@ -121,10 +121,7 @@ async def evaluate_interview(
 {transcript_text}
 
 ## Interview Plan
-{plan_json}
-
-## Candidate's Resume
-{resume_text}"""
+{plan_json}"""
 
     logger.info("Starting interview evaluation with Claude...")
     response = await chat(SYSTEM_PROMPT, user_message, max_tokens=16384)

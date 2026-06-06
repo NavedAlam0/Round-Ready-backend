@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     pipecat_agent_name: str = "roundready-voice"
     pipecat_api_base_url: str = "https://api.pipecat.daily.co"
 
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 load_aws_secret_env()

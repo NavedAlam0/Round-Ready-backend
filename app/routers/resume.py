@@ -23,6 +23,7 @@ router = APIRouter(prefix="/api", tags=["resume"])
 async def upload_resume(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -40,6 +41,12 @@ async def upload_resume(
 
     if not result["raw_text"].strip():
         raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+    # Save resume to user profile so it persists across sessions
+    current_user.resume_text = result["raw_text"]
+    current_user.resume_file_name = file.filename
+    db.add(current_user)
+    await db.commit()
 
     return ResumeUploadResponse(resume_text=result["raw_text"], page_count=result["pages"])
 

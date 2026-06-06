@@ -203,6 +203,7 @@ async def setup_interview(
 @router.post("/{interview_id}/plan")
 async def create_interview_plan(
     interview_id: str,
+    regenerate: bool = False,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -215,6 +216,21 @@ async def create_interview_plan(
     interview = result.scalar_one_or_none()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
+
+    # If plan already exists and not regenerating, return existing
+    if interview.interview_plan and not regenerate:
+        return {
+            "interview_id": interview.id,
+            "status": interview.status,
+            "plan": interview.interview_plan,
+            "context": {
+                "role_type": interview.role_type,
+                "level": interview.level,
+                "years_of_experience": interview.years_of_experience,
+                "employment_type": interview.employment_type,
+                "company_name": interview.company_info.get("name") if interview.company_info else None,
+            },
+        }
 
     try:
         plan = await generate_interview_plan(
@@ -400,6 +416,18 @@ async def _run_evaluation(interview_id: str):
             logger.warning(f"Cannot evaluate interview {interview_id}: no transcript")
             return
 
+        # Check minimum transcript — need at least 3 substantive user responses to evaluate
+        user_entries = [
+            e for e in iv.transcript
+            if e.get("role") == "user"
+            and len(e.get("text", "").strip().split()) >= 5  # at least 5 words to count as a real answer
+        ]
+        if len(user_entries) < 3:
+            logger.warning(f"Skipping evaluation for {interview_id}: insufficient user responses ({len(user_entries)})")
+            iv.status = "incomplete"
+            await session.commit()
+            return
+
         # Check if report already exists (avoid duplicate)
         existing_report = await session.execute(
             select(InterviewReport).where(InterviewReport.interview_id == interview_id)
@@ -411,7 +439,6 @@ async def _run_evaluation(interview_id: str):
         evaluation = await evaluate_interview(
             transcript=iv.transcript,
             interview_plan=iv.interview_plan or {},
-            resume_text=iv.resume_text,
         )
 
         # Save category scores
@@ -544,6 +571,13 @@ async def get_report(
     interview = result.scalar_one_or_none()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
+
+    # Check if interview was too short to evaluate
+    if interview.status == "incomplete":
+        return {
+            "status": "incomplete",
+            "message": "Interview was too short to generate a report. You need to answer at least a few questions for the AI to evaluate your performance.",
+        }
 
     # Get report
     report_result = await db.execute(

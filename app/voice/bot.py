@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime
 
 from loguru import logger
@@ -25,6 +26,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMContextFrame,
 )
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from app.config import settings
 from app.voice.interviewer_llm import build_system_prompt
@@ -58,7 +61,7 @@ class InterviewEndDetector(FrameProcessor):
     """
 
     END_MARKER = "[END_INTERVIEW]"
-    CLOSING_PHRASE = "feedback report shortly"
+    CLOSING_PHRASES = ("feedback report shortly", "ending the session now")
 
     def __init__(self, task: PipelineTask | None = None, **kwargs):
         super().__init__(**kwargs)
@@ -75,8 +78,8 @@ class InterviewEndDetector(FrameProcessor):
         if isinstance(frame, TextFrame):
             self._text_buffer += frame.text
 
-            # Check for closing phrase (backup detection)
-            if not self._should_end and self.CLOSING_PHRASE in self._text_buffer.lower():
+            # Check for closing phrases (normal end + early exit)
+            if not self._should_end and any(phrase in self._text_buffer.lower() for phrase in self.CLOSING_PHRASES):
                 self._should_end = True
                 logger.info("Detected closing phrase — will end after TTS finishes")
 
@@ -263,11 +266,48 @@ async def run_interview_bot(
         ),
     )
 
-    # Build context with system prompt
+    # -- Tool: check_interview_progress --
+    check_progress_schema = FunctionSchema(
+        name="check_interview_progress",
+        description="Check if the candidate has answered enough questions to receive a feedback report. MUST be called whenever the candidate wants to end, stop, or leave the interview early.",
+        properties={},
+        required=[],
+    )
+
+    tools = ToolsSchema(standard_tools=[check_progress_schema])
+
+    async def handle_check_progress(params):
+        """Count real questions asked and substantive answers given."""
+        entries = transcript.get_transcript()
+        assistant_entries = [e for e in entries if e["role"] == "assistant"]
+        questions_asked = max(0, len(assistant_entries) - 1)
+
+        substantive_answers = [
+            e for e in entries
+            if e["role"] == "user"
+            and len(e.get("text", "").strip().split()) >= 5
+        ]
+        questions_answered = len(substantive_answers)
+
+        can_generate_report = questions_answered >= 3
+        result = {
+            "questions_asked": questions_asked,
+            "questions_answered": questions_answered,
+            "minimum_required": 3,
+            "can_generate_report": can_generate_report,
+        }
+        logger.info(f"check_interview_progress: {result}")
+        await params.result_callback(json.dumps(result))
+
+    # Build context with system prompt + tools
     context = LLMContext(
         messages=[{"role": "system", "content": system_prompt}],
+        tools=tools,
     )
     context_aggregator = LLMContextAggregatorPair(context)
+
+    # Register the tool handler with the LLM
+    llm.register_function("check_interview_progress", handle_check_progress)
 
     # End-of-interview detector (inserted between LLM and TTS)
     end_detector = InterviewEndDetector()

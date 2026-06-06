@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
 from app.models import *  # noqa: F401, F403 — ensure all models are registered
-from app.routers import auth, resume, interview
+from app.routers import auth, resume, interview, dashboard
 from app.config import settings
 
 
@@ -29,6 +29,25 @@ async def _ensure_schema_columns():
     async with engine.begin() as conn:
         await conn.exec_driver_sql(
             "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS pipecat_session_id VARCHAR"
+        )
+        # User preferences columns
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS resume_text TEXT"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS resume_file_name VARCHAR"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS role_type VARCHAR"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS level VARCHAR"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS years_of_experience SMALLINT"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS employment_type VARCHAR"
         )
 
 
@@ -60,6 +79,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(resume.router)
 app.include_router(interview.router)
+app.include_router(dashboard.router)
 
 
 @app.get("/health")
