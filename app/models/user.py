@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Text, DateTime, SmallInteger
+from sqlalchemy import String, Text, DateTime, SmallInteger, Boolean, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -25,4 +25,11 @@ class User(Base):
     years_of_experience: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     employment_type: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # Plan & credits
+    plan: Mapped[str] = mapped_column(String, nullable=False, default="free")  # free, starter, pro
+    credits_remaining: Mapped[int] = mapped_column(Integer, nullable=False, default=2)  # free users get 2
+    is_super_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     interviews: Mapped[list["Interview"]] = relationship(back_populates="user")
+    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user")
+    payments: Mapped[list["Payment"]] = relationship(back_populates="user")

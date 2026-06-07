@@ -496,6 +496,20 @@ async def start_interview(
         if not interview.interview_plan:
             raise HTTPException(status_code=400, detail="Interview plan not generated yet")
 
+    # Credit check — super admins bypass
+    if not current_user.is_super_admin:
+        if current_user.credits_remaining <= 0:
+            raise HTTPException(
+                status_code=403,
+                detail="No credits remaining. Please upgrade your plan or buy a top-up.",
+            )
+        # Deduct 1 credit
+        current_user.credits_remaining -= 1
+        db.add(current_user)
+        await db.commit()
+        await db.refresh(current_user)
+        logger.info(f"Deducted 1 credit for user {current_user.id}, remaining: {current_user.credits_remaining}")
+
     # Reset status so we can restart
     if interview.status == "in_progress":
         # Stop old bot if running

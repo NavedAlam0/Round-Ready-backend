@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
 from app.models import *  # noqa: F401, F403 — ensure all models are registered
-from app.routers import auth, resume, interview, dashboard
+from app.routers import auth, resume, interview, dashboard, payment
 from app.config import settings
 
 
@@ -66,6 +66,16 @@ async def _ensure_schema_columns():
         await conn.exec_driver_sql(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS employment_type VARCHAR"
         )
+        # Plan & credits columns
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR DEFAULT 'free'"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS credits_remaining INTEGER DEFAULT 2"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN DEFAULT FALSE"
+        )
 
 
 @asynccontextmanager
@@ -97,6 +107,7 @@ app.include_router(auth.router)
 app.include_router(resume.router)
 app.include_router(interview.router)
 app.include_router(dashboard.router)
+app.include_router(payment.router)
 
 
 @app.get("/health")

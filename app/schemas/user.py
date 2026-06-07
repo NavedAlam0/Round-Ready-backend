@@ -7,6 +7,9 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     auth_provider: str
+    plan: str = "free"
+    credits_remaining: int = 2
+    is_super_admin: bool = False
 
     model_config = {"from_attributes": True}
 

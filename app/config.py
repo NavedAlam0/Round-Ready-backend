@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     pipecat_private_api_key: str = ""
     pipecat_agent_name: str = "roundready-voice"
     pipecat_api_base_url: str = "https://api.pipecat.daily.co"
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    razorpay_webhook_secret: str = ""
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
