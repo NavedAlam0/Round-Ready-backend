@@ -19,6 +19,10 @@ class Interview(Base):
     level: Mapped[str | None] = mapped_column(String, nullable=True)  # "entry" or "experienced"
     years_of_experience: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     employment_type: Mapped[str | None] = mapped_column(String, nullable=True)  # "internship" or "full_time"
+    interview_mode: Mapped[str] = mapped_column(String, default="voice")  # "voice" or "coding"
+    coding_language: Mapped[str | None] = mapped_column(String, nullable=True)  # "python", "javascript", "java", "cpp", "go"
+    coding_problem: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # generated problem: statement, examples, constraints, hints, optimal solution
+    final_code: Mapped[str | None] = mapped_column(Text, nullable=True)  # user's final submitted code
     interview_plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     transcript: Mapped[list | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String, default="setup")  # setup, planned, in_progress, completed

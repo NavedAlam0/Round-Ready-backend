@@ -30,6 +30,23 @@ async def _ensure_schema_columns():
         await conn.exec_driver_sql(
             "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS pipecat_session_id VARCHAR"
         )
+        # Coding round columns
+        await conn.exec_driver_sql(
+            "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS interview_mode VARCHAR DEFAULT 'voice'"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS coding_language VARCHAR"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS coding_problem JSONB"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS final_code TEXT"
+        )
+        # Code review in reports
+        await conn.exec_driver_sql(
+            "ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS code_review JSONB"
+        )
         # User preferences columns
         await conn.exec_driver_sql(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS resume_text TEXT"

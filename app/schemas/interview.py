@@ -38,6 +38,15 @@ class InterviewSetupRequest(BaseModel):
     level: Optional[str] = None  # "entry" or "experienced"
     years_of_experience: Optional[int] = None
     employment_type: Optional[str] = None  # "internship" or "full_time"
+    interview_mode: str = "voice"  # "voice" or "coding"
+    coding_language: Optional[str] = None  # "python", "javascript", "java", "cpp", "go"
+    coding_difficulty: Optional[str] = None  # "easy", "medium", "hard"
+    coding_topic: Optional[str] = None  # e.g. "arrays", "trees", "dynamic-programming"
+
+
+class CodeSyncRequest(BaseModel):
+    code: str
+    language: Optional[str] = None
 
 
 class InterviewSetupResponse(BaseModel):

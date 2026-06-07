@@ -11,9 +11,11 @@ from app.models.user import User
 from app.models.interview import Interview
 from app.models.score import InterviewScore, InterviewReport
 from app.routers.auth import get_current_user
-from app.schemas.interview import InterviewSetupRequest, InterviewSetupResponse
+from app.schemas.interview import InterviewSetupRequest, InterviewSetupResponse, CodeSyncRequest
 from app.services.question_planner import generate_interview_plan
+from app.services.coding_planner import generate_coding_problem
 from app.services.evaluator import evaluate_interview
+from app.services.coding_evaluator import evaluate_coding_interview
 from app.voice.daily_helpers import create_daily_room, get_daily_token
 from app.config import settings
 
@@ -21,11 +23,12 @@ router = APIRouter(prefix="/api/interview", tags=["interview"])
 
 
 def _voice_agent_payload(interview: Interview, bot_token: str, room_url: str) -> dict:
-    return {
+    payload = {
         "room_url": room_url,
         "bot_token": bot_token,
         "interview_id": interview.id,
         "interview_plan": interview.interview_plan,
+        "interview_mode": interview.interview_mode,
         "resume_text": interview.resume_text,
         "job_description": interview.job_description,
         "company_info": interview.company_info,
@@ -34,6 +37,10 @@ def _voice_agent_payload(interview: Interview, bot_token: str, room_url: str) ->
         "years_of_experience": interview.years_of_experience,
         "employment_type": interview.employment_type,
     }
+    if interview.interview_mode == "coding":
+        payload["coding_problem"] = interview.coding_problem
+        payload["coding_language"] = interview.coding_language
+    return payload
 
 
 async def _start_voice_agent(interview: Interview, bot_token: str, room_url: str) -> str | None:
@@ -129,6 +136,9 @@ async def list_interviews(
             "role_type": iv.role_type,
             "level": iv.level,
             "employment_type": iv.employment_type,
+            "interview_mode": iv.interview_mode,
+            "coding_language": iv.coding_language,
+            "coding_problem_title": iv.coding_problem.get("title") if iv.coding_problem else None,
             "company_name": iv.company_info.get("name") if iv.company_info else None,
             "overall_score": report.overall_score if report else None,
             "created_at": iv.created_at.isoformat(),
@@ -191,6 +201,8 @@ async def setup_interview(
         level=data.level,
         years_of_experience=data.years_of_experience,
         employment_type=data.employment_type,
+        interview_mode=data.interview_mode,
+        coding_language=data.coding_language,
         status="setup",
     )
     db.add(interview)
@@ -296,6 +308,168 @@ async def get_interview_plan(
     }
 
 
+@router.post("/{interview_id}/coding-plan")
+async def create_coding_plan(
+    interview_id: str,
+    regenerate: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a coding problem for a coding round interview."""
+    result = await db.execute(
+        select(Interview).where(
+            Interview.id == interview_id,
+            Interview.user_id == current_user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    if interview.interview_mode != "coding":
+        raise HTTPException(status_code=400, detail="This interview is not a coding round")
+
+    # Return existing if not regenerating
+    if interview.coding_problem and not regenerate:
+        return {
+            "interview_id": interview.id,
+            "status": interview.status,
+            "problem": interview.coding_problem,
+            "context": {
+                "role_type": interview.role_type,
+                "level": interview.level,
+                "years_of_experience": interview.years_of_experience,
+                "employment_type": interview.employment_type,
+                "coding_language": interview.coding_language,
+                "company_name": interview.company_info.get("name") if interview.company_info else None,
+            },
+        }
+
+    # Fetch previous coding problem titles for this user to avoid repeats
+    prev_result = await db.execute(
+        select(Interview.coding_problem).where(
+            Interview.user_id == current_user.id,
+            Interview.interview_mode == "coding",
+            Interview.coding_problem.isnot(None),
+            Interview.id != interview_id,
+        )
+    )
+    previous_problems = []
+    for (prob,) in prev_result.all():
+        if isinstance(prob, dict) and prob.get("title"):
+            previous_problems.append(prob["title"])
+
+    try:
+        problem = await generate_coding_problem(
+            role_type=interview.role_type,
+            level=interview.level,
+            years_of_experience=interview.years_of_experience,
+            employment_type=interview.employment_type,
+            coding_language=interview.coding_language,
+            previous_problems=previous_problems if previous_problems else None,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate coding problem: {str(e)}")
+
+    interview.coding_problem = problem
+    interview.status = "planned"
+    await db.commit()
+
+    return {
+        "interview_id": interview.id,
+        "status": "planned",
+        "problem": problem,
+        "context": {
+            "role_type": interview.role_type,
+            "level": interview.level,
+            "years_of_experience": interview.years_of_experience,
+            "employment_type": interview.employment_type,
+            "coding_language": interview.coding_language,
+            "company_name": interview.company_info.get("name") if interview.company_info else None,
+        },
+    }
+
+
+@router.get("/{interview_id}/coding-plan")
+async def get_coding_plan(
+    interview_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the coding problem for a coding round interview."""
+    result = await db.execute(
+        select(Interview).where(
+            Interview.id == interview_id,
+            Interview.user_id == current_user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    if not interview.coding_problem:
+        raise HTTPException(status_code=404, detail="Coding problem not generated yet")
+
+    return {
+        "interview_id": interview.id,
+        "status": interview.status,
+        "problem": interview.coding_problem,
+        "context": {
+            "role_type": interview.role_type,
+            "level": interview.level,
+            "years_of_experience": interview.years_of_experience,
+            "employment_type": interview.employment_type,
+            "coding_language": interview.coding_language,
+            "company_name": interview.company_info.get("name") if interview.company_info else None,
+        },
+    }
+
+
+@router.post("/{interview_id}/code-sync")
+async def sync_code(
+    interview_id: str,
+    data: CodeSyncRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save the user's current code snapshot (periodic backup + final save)."""
+    result = await db.execute(
+        select(Interview).where(
+            Interview.id == interview_id,
+            Interview.user_id == current_user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    interview.final_code = data.code
+    if data.language:
+        interview.coding_language = data.language
+    await db.commit()
+
+    return {"status": "ok"}
+
+
+@router.get("/{interview_id}/status")
+async def get_interview_status(
+    interview_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the current status of an interview."""
+    result = await db.execute(
+        select(Interview).where(
+            Interview.id == interview_id,
+            Interview.user_id == current_user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    return {"status": interview.status, "interview_mode": interview.interview_mode}
+
+
 @router.post("/{interview_id}/start")
 async def start_interview(
     interview_id: str,
@@ -312,8 +486,15 @@ async def start_interview(
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
 
-    if not interview.interview_plan:
-        raise HTTPException(status_code=400, detail="Interview plan not generated yet")
+    if interview.status == "completed":
+        raise HTTPException(status_code=400, detail="Interview already completed")
+
+    if interview.interview_mode == "coding":
+        if not interview.coding_problem:
+            raise HTTPException(status_code=400, detail="Coding problem not generated yet")
+    else:
+        if not interview.interview_plan:
+            raise HTTPException(status_code=400, detail="Interview plan not generated yet")
 
     # Reset status so we can restart
     if interview.status == "in_progress":
@@ -436,10 +617,18 @@ async def _run_evaluation(interview_id: str):
             logger.info(f"Report already exists for interview {interview_id}, skipping")
             return
 
-        evaluation = await evaluate_interview(
-            transcript=iv.transcript,
-            interview_plan=iv.interview_plan or {},
-        )
+        if iv.interview_mode == "coding":
+            evaluation = await evaluate_coding_interview(
+                transcript=iv.transcript,
+                coding_problem=iv.coding_problem or {},
+                final_code=iv.final_code,
+                coding_language=iv.coding_language,
+            )
+        else:
+            evaluation = await evaluate_interview(
+                transcript=iv.transcript,
+                interview_plan=iv.interview_plan or {},
+            )
 
         # Save category scores
         for cat_score in evaluation.get("category_scores", []):
@@ -462,6 +651,7 @@ async def _run_evaluation(interview_id: str):
             question_answers=evaluation.get("question_answers", []),
             confidence_analysis=evaluation.get("confidence_analysis"),
             skill_assessment=evaluation.get("skill_assessment"),
+            code_review=evaluation.get("code_review"),
         )
         session.add(report)
 
@@ -510,9 +700,13 @@ async def bot_callback(
         await session.commit()
         logger.info(f"Bot callback: interview {interview_id} completed with {len(transcript)} entries")
 
-    # Run evaluation after responding so the voice agent callback does not time out.
+    # Run evaluation after a short delay so the frontend's final code-sync
+    # can complete before we read final_code from the database.
     if transcript:
-        asyncio.create_task(_run_evaluation_safely(interview_id))
+        async def _delayed_evaluation(iid: str):
+            await asyncio.sleep(5)  # wait for frontend final code-sync to commit
+            await _run_evaluation_safely(iid)
+        asyncio.create_task(_delayed_evaluation(interview_id))
     elif error:
         logger.warning(f"Bot callback for {interview_id} had no transcript: {error}")
 
@@ -604,6 +798,7 @@ async def get_report(
             "question_answers": report.question_answers or [],
             "confidence_analysis": report.confidence_analysis,
             "skill_assessment": report.skill_assessment or [],
+            "code_review": report.code_review,
             "category_scores": [
                 {"category": s.category, "score": s.score, "feedback": s.feedback}
                 for s in scores
@@ -617,5 +812,9 @@ async def get_report(
             "employment_type": interview.employment_type,
             "company_name": interview.company_info.get("name") if interview.company_info else None,
             "interview_id": interview.id,
+            "interview_mode": interview.interview_mode,
+            "coding_language": interview.coding_language,
+            "coding_problem": interview.coding_problem,
+            "final_code": interview.final_code,
         },
     }

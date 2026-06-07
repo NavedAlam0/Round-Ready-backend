@@ -31,6 +31,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from app.config import settings
 from app.voice.interviewer_llm import build_system_prompt
+from app.voice.coding_interviewer_llm import build_coding_system_prompt
 from app.voice.emotion_tracker import EmotionTracker
 from app.voice.emotion_processor import EmotionMonitorProcessor, EmotionContextInjector
 
@@ -206,6 +207,92 @@ class InterviewMetadataTracker(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class CodeContextProcessor(FrameProcessor):
+    """Receives code updates from the frontend via Daily app messages and injects
+    them into the LLM context so the agent can see the candidate's code.
+
+    The frontend sends app messages with type "code_sync" containing the current
+    editor content. This processor listens for those messages on the transport
+    and prepends a [CODE UPDATE] block to the next LLM context.
+    """
+
+    def __init__(self, context: LLMContext, **kwargs):
+        super().__init__(**kwargs)
+        self._context = context
+        self._latest_code: str | None = None
+        self._latest_language: str | None = None
+        self._last_injected_code: str | None = None
+
+    def update_code(self, code: str, language: str | None = None):
+        """Called externally when a code_sync app message arrives."""
+        self._latest_code = code
+        if language:
+            self._latest_language = language
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        # Inject code context before LLM sees new user input
+        if isinstance(frame, TranscriptionFrame) and self._latest_code is not None:
+            # Only inject if the code actually changed
+            if self._latest_code != self._last_injected_code:
+                self._last_injected_code = self._latest_code
+                lang_label = self._latest_language or "code"
+                code_msg = {
+                    "role": "user",
+                    "content": f"[CODE UPDATE]\n```{lang_label}\n{self._latest_code}\n```",
+                }
+                # Insert as a system-level context message so it doesn't mess up
+                # the conversational flow — place it before the last user message
+                self._context.messages.append(code_msg)
+                logger.debug(f"Injected code context ({len(self._latest_code)} chars)")
+
+        await self.push_frame(frame, direction)
+
+
+class CodingMetadataTracker(FrameProcessor):
+    """Lightweight metadata tracker for coding mode.
+
+    Sends assistant transcript entries to the frontend but doesn't track
+    question progress (coding mode doesn't follow a question plan).
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._current_text = ""
+        self._response_count = 0
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, TextFrame) and not isinstance(frame, TranscriptionFrame):
+            self._current_text += frame.text
+
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._response_count += 1
+            assistant_text = self._current_text.strip()
+            if assistant_text:
+                transcript_msg = DailyOutputTransportMessageFrame(
+                    message={"type": "transcript", "role": "assistant", "text": assistant_text}
+                )
+                await self.push_frame(transcript_msg, FrameDirection.DOWNSTREAM)
+
+            # Send coding session metadata
+            metadata_msg = DailyOutputTransportMessageFrame(
+                message={
+                    "type": "interview_metadata",
+                    "interview_mode": "coding",
+                    "response_count": self._response_count,
+                    "response_type": "greeting" if self._response_count == 1 else "interaction",
+                }
+            )
+            await self.push_frame(metadata_msg, FrameDirection.DOWNSTREAM)
+
+            self._current_text = ""
+
+        await self.push_frame(frame, direction)
+
+
 async def run_interview_bot(
     room_url: str,
     bot_token: str,
@@ -217,20 +304,37 @@ async def run_interview_bot(
     level: str | None = None,
     years_of_experience: int | None = None,
     employment_type: str | None = None,
+    interview_mode: str = "voice",
+    coding_problem: dict | None = None,
+    coding_language: str | None = None,
 ) -> list[dict]:
     """Run the Pipecat interview bot. Returns the transcript when done."""
 
+    is_coding = interview_mode == "coding"
     transcript = TranscriptCollector()
-    system_prompt = build_system_prompt(
-        interview_plan=interview_plan,
-        resume_text=resume_text,
-        job_description=job_description,
-        company_info=company_info,
-        role_type=role_type,
-        level=level,
-        years_of_experience=years_of_experience,
-        employment_type=employment_type,
-    )
+
+    if is_coding and coding_problem:
+        system_prompt = build_coding_system_prompt(
+            coding_problem=coding_problem,
+            coding_language=coding_language,
+            resume_text=resume_text,
+            role_type=role_type,
+            level=level,
+            years_of_experience=years_of_experience,
+            employment_type=employment_type,
+            company_info=company_info,
+        )
+    else:
+        system_prompt = build_system_prompt(
+            interview_plan=interview_plan,
+            resume_text=resume_text,
+            job_description=job_description,
+            company_info=company_info,
+            role_type=role_type,
+            level=level,
+            years_of_experience=years_of_experience,
+            employment_type=employment_type,
+        )
 
     # Configure transport
     transport = DailyTransport(
@@ -314,7 +418,15 @@ async def run_interview_bot(
 
     # Real-time metadata — sends progress + transcript to frontend via Daily app messages
     user_transcript_fwd = UserTranscriptForwarder()
-    metadata_tracker = InterviewMetadataTracker(interview_plan=interview_plan)
+
+    # Code context processor for coding mode
+    code_context_processor = CodeContextProcessor(context=context) if is_coding else None
+
+    # Use different metadata tracker for coding mode
+    if is_coding:
+        metadata_tracker = CodingMetadataTracker()
+    else:
+        metadata_tracker = InterviewMetadataTracker(interview_plan=interview_plan)
 
     # Emotion awareness (multi-agent)
     emotion_tracker = EmotionTracker(check_interval=6)
@@ -322,23 +434,25 @@ async def run_interview_bot(
     emotion_monitor = EmotionMonitorProcessor(tracker=emotion_tracker, context=context)
 
     # Build pipeline
-    # Flow: input → STT → user_transcript_fwd → user_agg → emotion_injector → LLM → emotion_monitor → metadata_tracker → end_detector → TTS → output → assistant_agg
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            user_transcript_fwd,    # Sends user STT text to frontend
-            context_aggregator.user(),
-            emotion_injector,       # Injects emotion notes before LLM sees the context
-            llm,
-            emotion_monitor,        # Observes responses, triggers Feeling Agent in background
-            metadata_tracker,       # Sends interview progress + assistant transcript to frontend
-            end_detector,
-            tts,
-            transport.output(),
-            context_aggregator.assistant(),
-        ]
-    )
+    pipeline_stages = [
+        transport.input(),
+        stt,
+        user_transcript_fwd,    # Sends user STT text to frontend
+    ]
+    if code_context_processor:
+        pipeline_stages.append(code_context_processor)  # Injects code context before LLM
+    pipeline_stages.extend([
+        context_aggregator.user(),
+        emotion_injector,       # Injects emotion notes before LLM sees the context
+        llm,
+        emotion_monitor,        # Observes responses, triggers Feeling Agent in background
+        metadata_tracker,       # Sends interview progress + assistant transcript to frontend
+        end_detector,
+        tts,
+        transport.output(),
+        context_aggregator.assistant(),
+    ])
+    pipeline = Pipeline(pipeline_stages)
 
     task = PipelineTask(
         pipeline,
@@ -349,9 +463,16 @@ async def run_interview_bot(
     end_detector.set_task(task)
 
     # Event handlers
+    _greeted = False
+
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client, **kwargs):
+        nonlocal _greeted
         logger.info(f"Client connected: {client}")
+        if _greeted:
+            logger.info("Already greeted — skipping duplicate LLMContextFrame")
+            return
+        _greeted = True
         # Trigger the LLM to start the interview
         await task.queue_frames([LLMContextFrame(context=context)])
 
@@ -359,6 +480,16 @@ async def run_interview_bot(
     async def on_client_disconnected(transport, client, **kwargs):
         logger.info(f"Client disconnected: {client}")
         await task.cancel()
+
+    # Handle app messages from the frontend (code sync for coding mode)
+    if code_context_processor:
+        @transport.event_handler("on_app_message")
+        async def on_app_message(transport, message, sender, **kwargs):
+            if isinstance(message, dict) and message.get("type") == "code_sync":
+                code = message.get("code", "")
+                language = message.get("language")
+                code_context_processor.update_code(code, language)
+                logger.debug(f"Code sync received from {sender} ({len(code)} chars)")
 
     # Run the pipeline
     runner = PipelineRunner()
