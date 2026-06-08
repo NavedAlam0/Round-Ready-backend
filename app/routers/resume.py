@@ -40,6 +40,9 @@ async def upload_resume(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {str(e)}")
 
+    # Strip null bytes — some PDFs contain \x00 which PostgreSQL can't store
+    result["raw_text"] = result["raw_text"].replace("\x00", "")
+
     if not result["raw_text"].strip():
         raise HTTPException(status_code=400, detail="Could not extract text from PDF. Make sure your resume is not a scanned image.")
 
