@@ -600,6 +600,37 @@ async def get_transcript(
     return {"transcript": interview.transcript or []}
 
 
+def _check_coding_submission(final_code: str | None, coding_problem: dict | None, coding_language: str | None) -> dict:
+    """Check if the user wrote enough code beyond the starter template.
+
+    Returns {"sufficient": bool, "reason": str}.
+    """
+    if not final_code or not final_code.strip():
+        return {"sufficient": False, "reason": "No code was submitted."}
+
+    # Get the starter code for the user's language
+    starter_code = ""
+    if coding_problem and coding_language:
+        starter_code = (coding_problem.get("starter_code") or {}).get(coding_language, "")
+
+    # If final code is identical to starter code (ignoring whitespace)
+    if starter_code and final_code.strip() == starter_code.strip():
+        return {"sufficient": False, "reason": "Only the starter code was submitted — no changes were made."}
+
+    # Count new lines the user added (non-blank lines not in the starter)
+    starter_lines = set(line.strip() for line in starter_code.splitlines() if line.strip())
+    final_lines = [line for line in final_code.splitlines() if line.strip()]
+    new_lines = [line for line in final_lines if line.strip() not in starter_lines]
+
+    if len(new_lines) < 3:
+        return {
+            "sufficient": False,
+            "reason": f"Only {len(new_lines)} new line(s) of code written. Write at least 3 lines beyond the starter code.",
+        }
+
+    return {"sufficient": True, "reason": ""}
+
+
 async def _run_evaluation(interview_id: str):
     """Run evaluation on a completed interview and save results to DB."""
     async with async_session() as session:
@@ -611,17 +642,27 @@ async def _run_evaluation(interview_id: str):
             logger.warning(f"Cannot evaluate interview {interview_id}: no transcript")
             return
 
-        # Check minimum transcript — need at least 3 substantive user responses to evaluate
-        user_entries = [
-            e for e in iv.transcript
-            if e.get("role") == "user"
-            and len(e.get("text", "").strip().split()) >= 5  # at least 5 words to count as a real answer
-        ]
-        if len(user_entries) < 3:
-            logger.warning(f"Skipping evaluation for {interview_id}: insufficient user responses ({len(user_entries)})")
-            iv.status = "incomplete"
-            await session.commit()
-            return
+        # --- Coding mode: check code submission instead of spoken answers ---
+        if iv.interview_mode == "coding":
+            code_check = _check_coding_submission(iv.final_code, iv.coding_problem, iv.coding_language)
+            if not code_check["sufficient"]:
+                logger.warning(f"Skipping evaluation for coding interview {interview_id}: {code_check['reason']}")
+                iv.status = "incomplete"
+                iv.incomplete_reason = code_check["reason"]
+                await session.commit()
+                return
+        else:
+            # Voice mode: need at least 3 substantive user responses to evaluate
+            user_entries = [
+                e for e in iv.transcript
+                if e.get("role") == "user"
+                and len(e.get("text", "").strip().split()) >= 5
+            ]
+            if len(user_entries) < 3:
+                logger.warning(f"Skipping evaluation for {interview_id}: insufficient user responses ({len(user_entries)})")
+                iv.status = "incomplete"
+                await session.commit()
+                return
 
         # Check if report already exists (avoid duplicate)
         existing_report = await session.execute(
@@ -782,9 +823,14 @@ async def get_report(
 
     # Check if interview was too short to evaluate
     if interview.status == "incomplete":
+        if interview.interview_mode == "coding":
+            reason = interview.incomplete_reason or "Not enough code was written."
+            message = f"Unable to generate a report. {reason} Please write at least 3 lines of code beyond the starter template to receive feedback."
+        else:
+            message = "Interview was too short to generate a report. You need to answer at least a few questions for the AI to evaluate your performance."
         return {
             "status": "incomplete",
-            "message": "Interview was too short to generate a report. You need to answer at least a few questions for the AI to evaluate your performance.",
+            "message": message,
         }
 
     # Get report

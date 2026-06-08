@@ -370,7 +370,7 @@ async def run_interview_bot(
         ),
     )
 
-    # -- Tool: check_interview_progress --
+    # -- Tool: check_interview_progress (voice mode) --
     check_progress_schema = FunctionSchema(
         name="check_interview_progress",
         description="Check if the candidate has answered enough questions to receive a feedback report. MUST be called whenever the candidate wants to end, stop, or leave the interview early.",
@@ -378,7 +378,18 @@ async def run_interview_bot(
         required=[],
     )
 
-    tools = ToolsSchema(standard_tools=[check_progress_schema])
+    # -- Tool: check_code_submission (coding mode) --
+    check_code_schema = FunctionSchema(
+        name="check_code_submission",
+        description="Check if the candidate has written enough code to receive a feedback report. MUST be called before ending a coding interview — whether the candidate asks to end, or the session is wrapping up naturally.",
+        properties={},
+        required=[],
+    )
+
+    if is_coding:
+        tools = ToolsSchema(standard_tools=[check_code_schema])
+    else:
+        tools = ToolsSchema(standard_tools=[check_progress_schema])
 
     async def handle_check_progress(params):
         """Count real questions asked and substantive answers given."""
@@ -403,6 +414,47 @@ async def run_interview_bot(
         logger.info(f"check_interview_progress: {result}")
         await params.result_callback(json.dumps(result))
 
+    async def handle_check_code(params):
+        """Check if the candidate's code is sufficient for a report."""
+        # Get latest code from the code context processor
+        current_code = ""
+        if code_context_processor and code_context_processor._latest_code is not None:
+            current_code = code_context_processor._latest_code
+
+        # Get starter code
+        starter_code = ""
+        if coding_problem and coding_language:
+            starter_code = (coding_problem.get("starter_code") or {}).get(coding_language, "")
+
+        # Check: blank
+        if not current_code or not current_code.strip():
+            result = {"can_generate_report": False, "reason": "no_code", "message": "The candidate has not written any code."}
+            logger.info(f"check_code_submission: {result}")
+            await params.result_callback(json.dumps(result))
+            return
+
+        # Check: same as starter
+        if starter_code and current_code.strip() == starter_code.strip():
+            result = {"can_generate_report": False, "reason": "starter_only", "message": "The code is still the starter template — no changes were made."}
+            logger.info(f"check_code_submission: {result}")
+            await params.result_callback(json.dumps(result))
+            return
+
+        # Check: count new lines beyond starter
+        starter_lines = set(line.strip() for line in starter_code.splitlines() if line.strip())
+        final_lines = [line for line in current_code.splitlines() if line.strip()]
+        new_lines = [line for line in final_lines if line.strip() not in starter_lines]
+
+        if len(new_lines) < 3:
+            result = {"can_generate_report": False, "reason": "too_few_lines", "new_lines": len(new_lines), "message": f"Only {len(new_lines)} new line(s) of code written. Need at least 3."}
+            logger.info(f"check_code_submission: {result}")
+            await params.result_callback(json.dumps(result))
+            return
+
+        result = {"can_generate_report": True, "new_lines": len(new_lines), "message": "Sufficient code written for a report."}
+        logger.info(f"check_code_submission: {result}")
+        await params.result_callback(json.dumps(result))
+
     # Build context with system prompt + tools
     context = LLMContext(
         messages=[{"role": "system", "content": system_prompt}],
@@ -410,8 +462,9 @@ async def run_interview_bot(
     )
     context_aggregator = LLMContextAggregatorPair(context)
 
-    # Register the tool handler with the LLM
+    # Register the tool handlers with the LLM
     llm.register_function("check_interview_progress", handle_check_progress)
+    llm.register_function("check_code_submission", handle_check_code)
 
     # End-of-interview detector (inserted between LLM and TTS)
     end_detector = InterviewEndDetector()

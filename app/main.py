@@ -43,6 +43,9 @@ async def _ensure_schema_columns():
         await conn.exec_driver_sql(
             "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS final_code TEXT"
         )
+        await conn.exec_driver_sql(
+            "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS incomplete_reason TEXT"
+        )
         # Code review in reports
         await conn.exec_driver_sql(
             "ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS code_review JSONB"
