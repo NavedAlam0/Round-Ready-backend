@@ -632,7 +632,13 @@ def _check_coding_submission(final_code: str | None, coding_problem: dict | None
 
 
 async def _run_evaluation(interview_id: str):
-    """Run evaluation on a completed interview and save results to DB."""
+    """Run evaluation on a completed interview and save results to DB.
+
+    Splits DB access into two phases so the connection is NOT held during
+    the long Claude API call (which can take 30-60+ seconds).
+    """
+
+    # --- Phase 1: Read interview data, release connection quickly ---
     async with async_session() as session:
         result = await session.execute(
             select(Interview).where(Interview.id == interview_id)
@@ -672,18 +678,37 @@ async def _run_evaluation(interview_id: str):
             logger.info(f"Report already exists for interview {interview_id}, skipping")
             return
 
-        if iv.interview_mode == "coding":
-            evaluation = await evaluate_coding_interview(
-                transcript=iv.transcript,
-                coding_problem=iv.coding_problem or {},
-                final_code=iv.final_code,
-                coding_language=iv.coding_language,
-            )
-        else:
-            evaluation = await evaluate_interview(
-                transcript=iv.transcript,
-                interview_plan=iv.interview_plan or {},
-            )
+        # Extract data we need for evaluation before releasing the connection
+        interview_mode = iv.interview_mode
+        transcript = iv.transcript
+        interview_plan = iv.interview_plan or {}
+        coding_problem = iv.coding_problem or {}
+        final_code = iv.final_code
+        coding_language = iv.coding_language
+
+    # --- Phase 2: Call Claude API (no DB connection held) ---
+    if interview_mode == "coding":
+        evaluation = await evaluate_coding_interview(
+            transcript=transcript,
+            coding_problem=coding_problem,
+            final_code=final_code,
+            coding_language=coding_language,
+        )
+    else:
+        evaluation = await evaluate_interview(
+            transcript=transcript,
+            interview_plan=interview_plan,
+        )
+
+    # --- Phase 3: Save results with a fresh connection ---
+    async with async_session() as session:
+        # Re-check for duplicate (another task may have finished first)
+        existing_report = await session.execute(
+            select(InterviewReport).where(InterviewReport.interview_id == interview_id)
+        )
+        if existing_report.scalar_one_or_none():
+            logger.info(f"Report already exists for interview {interview_id}, skipping save")
+            return
 
         # Save category scores
         for cat_score in evaluation.get("category_scores", []):
@@ -710,7 +735,14 @@ async def _run_evaluation(interview_id: str):
         )
         session.add(report)
 
-        iv.status = "evaluated"
+        # Update interview status
+        iv_result = await session.execute(
+            select(Interview).where(Interview.id == interview_id)
+        )
+        iv = iv_result.scalar_one_or_none()
+        if iv:
+            iv.status = "evaluated"
+
         await session.commit()
         logger.info(f"Evaluation saved for interview {interview_id}, score: {evaluation['overall_score']}")
 
