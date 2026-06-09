@@ -16,7 +16,7 @@ from app.services.question_planner import generate_interview_plan
 from app.services.coding_planner import generate_coding_problem
 from app.services.evaluator import evaluate_interview
 from app.services.coding_evaluator import evaluate_coding_interview
-from app.voice.daily_helpers import create_daily_room, get_daily_token
+from app.services.daily_helpers import create_daily_room, get_daily_token
 from app.config import settings
 
 router = APIRouter(prefix="/api/interview", tags=["interview"])
