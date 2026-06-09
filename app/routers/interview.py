@@ -367,6 +367,8 @@ async def create_coding_plan(
             employment_type=interview.employment_type,
             coding_language=interview.coding_language,
             previous_problems=previous_problems if previous_problems else None,
+            resume_text=interview.resume_text,
+            company_info=interview.company_info,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate coding problem: {str(e)}")

@@ -28,6 +28,10 @@ class CompanyResearchResponse(BaseModel):
     tech_stack: list[str]
     products: list[str]
     culture_notes: str
+    engineering_challenges: list[str] = []
+    predicted_interview_topics: list[str] = []
+    predicted_coding_topics: list[str] = []
+    interview_style: str = ""
 
 
 class InterviewSetupRequest(BaseModel):

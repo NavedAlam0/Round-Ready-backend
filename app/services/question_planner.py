@@ -145,6 +145,20 @@ async def generate_interview_plan(
         culture = company_info.get('culture_notes', '')
         if culture and culture != "Not available from website":
             user_message += f"Culture: {culture}\n"
+        eng_challenges = company_info.get('engineering_challenges', [])
+        if eng_challenges:
+            user_message += f"\nEngineering Challenges this company faces:\n"
+            for ch in eng_challenges:
+                user_message += f"- {ch}\n"
+        predicted_topics = company_info.get('predicted_interview_topics', [])
+        if predicted_topics:
+            user_message += f"\nPredicted Interview Topics (questions this company is likely to ask):\n"
+            for t in predicted_topics:
+                user_message += f"- {t}\n"
+            user_message += "\nIMPORTANT: Use the predicted interview topics above to guide your question generation. These are topics this specific company is known to test on. Include questions that cover these topics, adapted to the candidate's experience level and resume.\n"
+        interview_style = company_info.get('interview_style', '')
+        if interview_style:
+            user_message += f"\nInterview Style at this company: {interview_style}\n"
 
     if role_type:
         user_message += f"\n\n## Target Role: {role_type}\n"
