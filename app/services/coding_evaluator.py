@@ -155,8 +155,10 @@ async def evaluate_coding_interview(
 ## Session Transcript
 {transcript_text}"""
 
-    logger.info("Starting coding interview evaluation with Claude...")
-    response = await chat(SYSTEM_PROMPT, user_message, max_tokens=16384)
+    logger.info("Starting coding interview evaluation...")
+    # "coding" tier = the reasoning-capable model for the configured provider,
+    # since judging code benefits from deeper analysis than plain chat.
+    response = await chat(SYSTEM_PROMPT, user_message, max_tokens=16384, tier="coding")
 
     # Parse JSON from response
     text = response.strip()

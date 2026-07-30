@@ -9,3 +9,8 @@ __pycache__/
 interview_bot.db
 roundready-*-firebase-adminsdk-*.json
 app/uploads/
+
+# Env backups and stray files — never commit (may contain secrets)
+.env.*
+!.env.example
+*.bak

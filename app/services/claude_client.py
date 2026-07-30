@@ -1,23 +1,25 @@
-import anthropic
+"""Backwards-compatibility shim.
 
-from app.config import settings
+The real implementation lives in `llm_client.py`, which is provider-agnostic.
+This module only exists so existing imports keep working:
 
-_client = None
+    from app.services.claude_client import chat
+
+New code should import from `app.services.llm_client` instead.
+"""
+
+from app.services.llm_client import chat, chat_json
+
+__all__ = ["chat", "chat_json", "get_claude_client"]
 
 
-def get_claude_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.claude_api_key)
-    return _client
+def get_claude_client():
+    """Deprecated: returns the raw Anthropic client.
 
+    Kept only for callers that haven't migrated. Using this bypasses the
+    provider abstraction and breaks when LLM_PROVIDER isn't "anthropic",
+    so prefer `chat()` / `chat_json()`.
+    """
+    from app.services.llm_client import _anthropic_client
 
-async def chat(system_prompt: str, user_message: str, max_tokens: int = 4096) -> str:
-    client = get_claude_client()
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    return response.content[0].text
+    return _anthropic_client()

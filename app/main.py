@@ -81,9 +81,35 @@ async def _ensure_schema_columns():
         )
 
 
+def _log_llm_config() -> None:
+    """Log the resolved LLM provider, and warn loudly if it can't work.
+
+    A silently-misconfigured provider used to surface as a confusing auth error
+    deep inside a request, so surface it at boot instead.
+    """
+    from loguru import logger
+
+    from app.services.llm_client import active_provider_info
+
+    info = active_provider_info()
+    if info.get("error"):
+        logger.error(f"LLM CONFIG INVALID: {info['error']}")
+        return
+    logger.info(
+        f"LLM provider: {info['provider']} (api={info['api']}, "
+        f"base_url={info['base_url']}) models={info['models']}"
+    )
+    if not info["has_key"]:
+        logger.error(
+            f"LLM provider '{info['provider']}' has NO API KEY set — every "
+            f"AI feature will fail. Set {info['provider'].upper()}_API_KEY in .env."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
+    _log_llm_config()
     # Create all tables on startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

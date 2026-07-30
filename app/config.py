@@ -1,7 +1,13 @@
 import json
 import os
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# Load .env into os.environ as well as into pydantic Settings. The LLM layer
+# resolves per-provider keys dynamically (e.g. GEMINI_API_KEY, GROQ_MODEL) via
+# os.getenv, so adding a new provider needs no new field here.
+load_dotenv(override=False)
 
 
 def load_aws_secret_env() -> None:
@@ -26,6 +32,17 @@ def load_aws_secret_env() -> None:
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://user:pass@localhost:5432/roundready"
     secret_key: str = "dev-secret-key-change-me-in-production"
+
+    # --- LLM provider selection (see app/services/llm_client.py) ---
+    # Any provider in llm_client._PRESETS works here: openai, anthropic,
+    # gemini, groq, openrouter, deepseek, mistral, together, xai, ollama.
+    llm_provider: str = "openai"
+    # Optional second provider tried if the primary fails (blank = disabled).
+    llm_fallback_provider: str = ""
+    llm_fallback_enabled: bool = False
+    # Reasoning effort for the "coding" tier on providers that support it.
+    llm_reasoning_effort: str = "medium"
+
     claude_api_key: str = ""
     deepgram_api_key: str = ""
     elevenlabs_api_key: str = ""

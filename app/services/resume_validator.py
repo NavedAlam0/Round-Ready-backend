@@ -1,6 +1,6 @@
 from loguru import logger
 
-from app.services.claude_client import get_claude_client
+from app.services.llm_client import chat_json
 
 SYSTEM_PROMPT = """You are a resume validation expert. Your job is to determine if the given text is extracted from a real resume/CV or not.
 
@@ -37,25 +37,18 @@ async def validate_resume_text(text: str) -> dict:
             "reason": "The document has too little text. Please upload a resume with your details.",
         }
 
-    # Use Haiku for fast, cheap validation
+    # "light" tier = the cheap/fast model for whichever provider is configured
     try:
-        client = get_claude_client()
         # Only send first 3000 chars to keep it fast and cheap
         truncated = text[:3000]
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        result = await chat_json(
+            SYSTEM_PROMPT,
+            truncated,
             max_tokens=100,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": truncated}],
+            tier="light",
+            # On unparseable output, don't block the upload.
+            default={"is_resume": True, "reason": ""},
         )
-        raw = response.content[0].text.strip()
-
-        # Parse JSON response — strip markdown code fences if present
-        import json
-        import re
-        cleaned = re.sub(r"^```(?:json)?\s*", "", raw)
-        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-        result = json.loads(cleaned)
         return {
             "is_resume": result.get("is_resume", False),
             "reason": result.get("reason", ""),
