@@ -82,12 +82,30 @@ You MUST respond with valid JSON in this exact format:
   ]
 }
 
-Include a mix of:
-- Behavioral questions (teamwork, leadership, conflict)
-- Technical questions (relevant to their skills and level)
-- Situational questions (how would you handle...)
-- Company-specific questions (if company info provided)
-- Skill/Conceptual questions (test understanding of technologies, CS fundamentals, and tools listed on the resume)
+## QUESTION MIX — TECHNICAL ROLES ARE TECHNICAL INTERVIEWS
+
+For any engineering role (software engineer, backend, frontend, full-stack,
+mobile, data, ML, DevOps/SRE, etc.) the mix MUST be:
+
+- **70-80% technical**: skill/conceptual depth, how-it-works internals,
+  debugging, architecture and trade-offs, failure modes
+- **20-30% non-technical**: behavioural/ownership questions, and only where
+  they reveal engineering judgement (a hard technical call they made, an
+  incident they owned, a disagreement about a design)
+
+Do NOT pad the plan with generic workplace questions. At most ONE pure
+behavioural question ("tell me about a conflict") in the entire plan.
+
+BANNED for engineering roles — these make it feel like a product/manager
+interview instead of an engineering one:
+- "How do you prioritise features?" / "How do you work with stakeholders?"
+- "How do you gather requirements?" / "How do you measure product success?"
+- "Where do you see yourself in five years?"
+- "What's your greatest strength/weakness?"
+- Anything answerable with zero technical knowledge
+
+If the role is genuinely non-engineering (product manager, designer, sales),
+ignore the ratio above and use judgement appropriate to that role.
 
 ## IMPORTANT — Skill-Based Assessment (ALL candidates, ALL levels)
 You MUST include skill/conceptual questions for EVERY candidate regardless of experience level. Allocate at LEAST 30-40% of questions to test actual technical understanding.
@@ -113,11 +131,71 @@ Examples:
 - Resume says "MongoDB" → "When would you choose MongoDB over a relational database?"
 
 ### Step 3: Adjust depth by level
-- **Freshers (0-2 years)**: Ask foundational understanding of their listed skills + CS basics. If few projects, increase skill questions to 50%+.
-- **Mid-Level (3-5 years)**: Ask deeper "how it works under the hood" questions + architecture trade-offs related to their skills.
-- **Senior (6+ years)**: Ask about advanced internals, scalability challenges, and technical decision-making around their skills.
+Level changes the SCOPE of what you ask about — never whether the question is
+genuinely technical. A candidate with 1 year of experience still gets real
+engineering questions; they are just scoped to what they have actually touched.
+
+- **Freshers (0-2 years)**: Foundations, but *probed properly*. Not "what is an
+  index" — rather "your resume says you added an index to speed up a query;
+  what did the database do differently after that?" If they have few projects,
+  push skill questions to 50%+.
+- **Mid-Level (3-5 years)**: Under-the-hood mechanics and trade-offs on the
+  systems they built. Why this design and not the obvious alternative.
+- **Senior (6+ years)**: Internals, scale limits, failure modes, and the
+  technical decisions they owned — including ones that went badly.
+
+### Step 4: Set the bar — interview like a CTO, not a screener
+
+Every technical question must be answerable ONLY by someone who genuinely did
+the work. If a candidate could answer it from a blog post, it is too shallow.
+
+The difference:
+
+| Too shallow (avoid)                          | Right depth (aim for this)                                                                 |
+|----------------------------------------------|--------------------------------------------------------------------------------------------|
+| "How does a Docker container differ from a VM?" | "Your service runs in Docker — if it works locally but OOMs in production, how do you find out why?" |
+| "Explain the Node.js event loop."            | "You built a Node API. What happens to your other requests if one handler does a synchronous 200ms CPU task?" |
+| "What's the difference between SQL and NoSQL?" | "You chose PostgreSQL for this project. At what point would that choice have started hurting you, and what would you have seen first?" |
+| "What is REST?"                              | "Your API returns 200 with an error body. What breaks for the clients consuming it?" |
+
+Rules for every technical question:
+- Anchor it to something SPECIFIC on their resume — a named project, service,
+  technology, or a number they claimed
+- Prefer "what happened / what would you see / how would you find out" over
+  "what is X"
+- Ask about the boundary: when their approach breaks, what it costs, what they
+  would do differently
+- It is fine — good, even — if a question is hard enough that a weak candidate
+  cannot answer it. That is the signal.
+
+Use `follow_up_hints` as a real probing ladder that gets harder each step, so
+the interviewer can keep digging until it finds the edge of their knowledge.
+Example for a caching question:
+  1. "What was your cache invalidation strategy?"
+  2. "What happens on a cache stampede when that key expires?"
+  3. "How would you tell that was happening from your metrics?"
 
 Respond ONLY with the JSON, no other text."""
+
+
+# Roles that get the heavy technical mix. Substring match, lowercased.
+_ENGINEERING_MARKERS = (
+    "engineer", "developer", "programmer", "sde", "swe", "architect",
+    "backend", "back-end", "frontend", "front-end", "full stack", "fullstack",
+    "full-stack", "mobile", "android", "ios", "devops", "sre", "platform",
+    "infrastructure", "data scien", "data engineer", "machine learning", "ml ",
+    "ai engineer", "security engineer", "qa engineer", "test engineer",
+)
+
+
+def _is_engineering_role(role_type: str | None) -> bool:
+    if not role_type:
+        return False
+    r = role_type.lower()
+    # "product manager" must not match just because it contains "product".
+    if "product manager" in r or r.strip() in ("product", "pm"):
+        return False
+    return any(marker in r for marker in _ENGINEERING_MARKERS)
 
 
 async def generate_interview_plan(
@@ -162,6 +240,18 @@ async def generate_interview_plan(
 
     if role_type:
         user_message += f"\n\n## Target Role: {role_type}\n"
+        user_message += (
+            f"This is a {role_type} interview. Calibrate the technical domain to "
+            f"this role specifically — the questions a {role_type} does the job "
+            f"with, not generic tech trivia and not product/process questions.\n"
+        )
+        if _is_engineering_role(role_type):
+            user_message += (
+                "This is an ENGINEERING role, so apply the 70-80% technical mix "
+                "and the banned-question list from your instructions. The "
+                "candidate is practising for a real engineering interview — it "
+                "must feel like a CTO or head of engineering is asking.\n"
+            )
 
     if level or years_of_experience is not None or employment_type:
         user_message += f"\n## Candidate Level\n"
@@ -175,7 +265,9 @@ async def generate_interview_plan(
     if job_description:
         user_message += f"\n\n## Job Description\n{job_description}"
 
-    response = await chat(SYSTEM_PROMPT, user_message)
+    # "coding" tier = the reasoning-capable model. Writing questions that probe
+    # real depth (rather than definitions) benefits from actual reasoning.
+    response = await chat(SYSTEM_PROMPT, user_message, tier="coding")
 
     # Parse JSON from response (handle markdown code blocks)
     text = response.strip()
