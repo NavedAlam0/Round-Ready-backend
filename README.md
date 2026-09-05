@@ -38,7 +38,6 @@ backend/
 │   │   ├── resume_parser.py     # Parse PDF resumes
 │   │   ├── company_researcher.py # Company research
 │   │   ├── job_scraper.py       # Job description scraping
-│   │   └── feeling_agent.py     # Emotion analysis via Claude
 │   └── voice/
 │       ├── daily_helpers.py     # Daily.co room & token management
 │       ├── interviewer_llm.py   # System prompt builder
