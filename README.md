@@ -190,6 +190,27 @@ All endpoints except `/health` and `/bot-callback` require a Firebase Bearer tok
 
 ## Environment Variables Reference
 
+### AWS Secrets Manager (production)
+
+The backend can load a JSON secret at startup. Set these variables in the
+backend container/task (never in the frontend):
+
+```bash
+AWS_BACKEND_ENV_SECRET_NAME=roundready/prod/backend-env
+AWS_REGION=ap-south-1
+LLM_PROVIDER=openai
+```
+
+The JSON secret must contain an `OPENAI_API_KEY` property. The AWS task/instance
+role must allow `secretsmanager:GetSecretValue` for that secret. After changing
+the secret or these variables, restart/redeploy the backend so the process
+reloads them. `OPENAI_API_KEY` is not read from the frontend or copied into the
+Docker image.
+
+If your hosting platform supports JSON-key secret mapping instead, map the
+secret property `OPENAI_API_KEY` to the container variable `OPENAI_API_KEY`,
+and map `LLM_PROVIDER` to `LLM_PROVIDER`.
+
 | Variable | Description | Required |
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL connection string (asyncpg format) | Yes |
