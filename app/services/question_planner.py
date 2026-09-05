@@ -275,4 +275,37 @@ async def generate_interview_plan(
         text = text.split("\n", 1)[1]
         text = text.rsplit("```", 1)[0]
 
-    return json.loads(text)
+    plan = json.loads(text)
+
+    # Treat the requested interview length as a contract, not just a prompt
+    # suggestion. Models occasionally return only a few questions despite the
+    # 8-12 requirement, which causes the voice agent to finish too early.
+    question_count = sum(
+        len(category.get("questions", []))
+        for category in plan.get("categories", [])
+        if isinstance(category, dict)
+    )
+    if question_count < 8:
+        expansion_prompt = (
+            "The interview plan below contains only "
+            f"{question_count} questions. Expand it to 8-12 total distinct "
+            "questions. Keep the existing questions, add technically useful "
+            "resume-grounded questions and follow-ups, and return ONLY valid "
+            "JSON in the exact same categories/questions schema.\n\n"
+            f"CURRENT PLAN:\n{json.dumps(plan)}"
+        )
+        expanded = await chat(SYSTEM_PROMPT, expansion_prompt, tier="coding")
+        expanded_text = expanded.strip()
+        if expanded_text.startswith("```"):
+            expanded_text = expanded_text.split("\n", 1)[1]
+            expanded_text = expanded_text.rsplit("```", 1)[0]
+        expanded_plan = json.loads(expanded_text)
+        expanded_count = sum(
+            len(category.get("questions", []))
+            for category in expanded_plan.get("categories", [])
+            if isinstance(category, dict)
+        )
+        if expanded_count >= 8:
+            plan = expanded_plan
+
+    return plan
