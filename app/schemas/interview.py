@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
 
@@ -51,6 +51,19 @@ class InterviewSetupRequest(BaseModel):
 class CodeSyncRequest(BaseModel):
     code: str
     language: Optional[str] = None
+    is_final: bool = False
+
+
+class TranscriptEntry(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    role: str = Field(min_length=1)
+    text: str
+
+
+class BotCallbackRequest(BaseModel):
+    transcript: list[TranscriptEntry] = Field(default_factory=list)
+    status: Optional[str] = None
+    error: Optional[str] = None
 
 
 class InterviewSetupResponse(BaseModel):

@@ -7,6 +7,7 @@ from app.database import engine, Base
 from app.models import *  # noqa: F401, F403 — ensure all models are registered
 from app.routers import auth, resume, interview, dashboard, payment
 from app.config import settings
+from app.services.report_notifications import ReportNotificationHub, install_report_notifications
 
 
 async def _prefetch_google_keys():
@@ -42,6 +43,9 @@ async def _ensure_schema_columns():
         )
         await conn.exec_driver_sql(
             "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS final_code TEXT"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS code_finalized_at TIMESTAMPTZ"
         )
         await conn.exec_driver_sql(
             "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS incomplete_reason TEXT"
@@ -114,11 +118,18 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _ensure_schema_columns()
+    async with engine.begin() as conn:
+        await install_report_notifications(conn)
+    notifications = ReportNotificationHub(engine)
+    await notifications.start()
+    app.state.report_notifications = notifications
     # Pre-fetch Google keys in background (don't block startup)
     asyncio.create_task(_prefetch_google_keys())
-    yield
-    # Clean up DB connections on shutdown
-    await engine.dispose()
+    try:
+        yield
+    finally:
+        await notifications.close()
+        await engine.dispose()
 
 
 app = FastAPI(title="AI Interview Bot", version="0.1.0", lifespan=lifespan)

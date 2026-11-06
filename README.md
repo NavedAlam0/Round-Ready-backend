@@ -159,6 +159,19 @@ uvicorn app.main:app --port 8000
 
 The server starts on `http://localhost:8000`. Tables are auto-created on startup.
 
+Run the report worker in a second terminal with the same backend environment:
+
+```bash
+venv/bin/python -m app.worker
+```
+
+The worker reads saved jobs from PostgreSQL. The API accepts report requests;
+the worker performs the AI evaluation. Local API-only startup does not run the
+worker. The Docker image runs both processes through `python -m app.serve` and
+exits if either process unexpectedly stops, allowing the container platform to
+restart them. The worker retries database startup until the API has installed
+the schema.
+
 **Note:** Do NOT use `--reload` flag with asyncpg — it causes connection issues.
 
 ## API Endpoints
@@ -182,8 +195,11 @@ The server starts on `http://localhost:8000`. Tables are auto-created on startup
 - `POST /api/interview/{id}/start` — Start voice interview (creates Daily room, starts voice agent)
 - `POST /api/interview/{id}/end` — End interview
 - `GET /api/interview/{id}/transcript` — Get interview transcript
-- `POST /api/interview/{id}/evaluate` — Trigger evaluation
+- `POST /api/interview/{id}/evaluate` — Queue evaluation (202; repeated requests preserve the existing job)
+- `POST /api/interview/{id}/code-sync` — Save a code backup, or submit final code with `is_final: true`
+- `POST /api/interview/{id}/code-finalize` — Explicitly submit the last saved server backup after a lost browser draft
 - `GET /api/interview/{id}/report` — Get evaluation report
+- `GET /api/interview/{id}/report/events` — Authenticated SSE status updates for the interview owner
 - `POST /api/interview/{id}/bot-callback` — Callback from voice agent (internal)
 
 All endpoints except `/health` and `/bot-callback` require a Firebase Bearer token in the `Authorization` header.
@@ -240,8 +256,46 @@ and map `LLM_PROVIDER` to `LLM_PROVIDER`.
 7. **Backend starts voice interview** — creates a Daily.co room, calls the voice agent server to start the bot
 8. **Voice agent runs the interview** — Pipecat pipeline with Deepgram STT, Claude LLM, ElevenLabs TTS
 9. **Voice agent sends transcript back** via `/bot-callback` when interview ends
-10. **Backend evaluates the interview** — sends transcript to Claude for scoring and feedback
-11. **User views report** — scores, strengths, weaknesses, recommendations
+10. **Backend saves a report job** in the same transaction as the final input. Coding jobs wait for both the transcript and an explicit final code submission, in either arrival order.
+11. **Worker evaluates the saved inputs**, checkpoints the AI response, and saves the report, scores, and ready status together.
+12. **Backend sends report status through SSE**. The frontend downloads the report when ready, without repeatedly fetching it while it is being generated.
+
+### Report recovery and notifications
+
+Jobs move through `queued`, `generating`, `retrying`, and `ready`, with terminal
+`failed` or `incomplete` outcomes when appropriate. Workers reserve jobs using
+expiring leases. Another worker can reclaim an unfinished job after a crash;
+stale workers cannot overwrite the new owner's work. Temporary failures use
+bounded retries (three processing attempts by default). A saved AI response is
+reused after interruption; an AI request interrupted before its response was
+saved may need to be repeated. Failed jobs remain saved for investigation;
+calling `/evaluate` does not reset them or spend more AI requests.
+
+The API uses one PostgreSQL `LISTEN` connection per API process. Database
+triggers send an interview ID only after the transaction commits. SSE routes
+verify Firebase authentication and interview ownership before subscribing, and
+read the latest saved state again on reconnect. Each stream sends a heartbeat
+every 15 seconds and reconnects after five minutes to recheck authentication.
+Keep proxy buffering disabled for SSE and proxy idle timeouts above the
+heartbeat interval; the response sends `X-Accel-Buffering: no`.
+
+Deploy the updated backend and frontend together: coding completion now needs
+the `is_final` marker. API startup adds `report_jobs`, `code_finalized_at`, and
+notification triggers, requiring the existing schema owner's DDL permissions.
+The updated voice agent retries transient callback delivery failures. Browser
+disconnects do not stop a saved backend job. Voice-process destruction before
+the transcript reaches the backend is not covered by report-job recovery;
+that would require a persistent voice outbox.
+
+### Offline report tests
+
+```bash
+venv/bin/python -m unittest tests.test_report_jobs tests.test_report_worker tests.test_report_completion tests.test_report_routes tests.test_report_notifications tests.test_serve -v
+```
+
+These tests use disposable local PostgreSQL clusters and fake AI/auth services,
+without loading application credentials. PostgreSQL `initdb` and `pg_ctl` must
+be available on PATH.
 
 ### Voice Agent Communication
 

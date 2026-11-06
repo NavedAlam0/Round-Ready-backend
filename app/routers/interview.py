@@ -1,7 +1,11 @@
 import asyncio
+import hmac
+import json
+import time
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +15,15 @@ from app.models.user import User
 from app.models.interview import Interview
 from app.models.score import InterviewScore, InterviewReport
 from app.routers.auth import get_current_user
-from app.schemas.interview import InterviewSetupRequest, InterviewSetupResponse, CodeSyncRequest
+from app.schemas.interview import InterviewSetupRequest, InterviewSetupResponse, CodeSyncRequest, BotCallbackRequest
 from app.services.question_planner import generate_interview_plan
 from app.services.coding_planner import generate_coding_problem
-from app.services.evaluator import evaluate_interview
-from app.services.coding_evaluator import evaluate_coding_interview
+from app.services.report_completion import (
+    DomainFinalSubmissionConflict, complete_from_callback, end_completed_interview,
+    finalize_saved_code, request_report, save_code_submission,
+)
+from app.services.report_jobs import InterviewNotFoundError, ReportJobNotReadyError
+from app.services.report_progress import get_report_progress
 from app.services.daily_helpers import create_daily_room, get_daily_token
 from app.config import settings
 
@@ -416,6 +424,7 @@ async def get_coding_plan(
         "interview_id": interview.id,
         "status": interview.status,
         "problem": interview.coding_problem,
+        "saved_code": interview.final_code,
         "context": {
             "role_type": interview.role_type,
             "level": interview.level,
@@ -427,6 +436,12 @@ async def get_coding_plan(
     }
 
 
+def _completion_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, InterviewNotFoundError):
+        return HTTPException(status_code=404, detail="Interview not found")
+    return HTTPException(status_code=409, detail=str(exc))
+
+
 @router.post("/{interview_id}/code-sync")
 async def sync_code(
     interview_id: str,
@@ -434,23 +449,32 @@ async def sync_code(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Save the user's current code snapshot (periodic backup + final save)."""
-    result = await db.execute(
-        select(Interview).where(
-            Interview.id == interview_id,
-            Interview.user_id == current_user.id,
+    """Save a backup or atomically accept the final coding submission."""
+    try:
+        job = await save_code_submission(
+            db, interview_id, user_id=current_user.id, code=data.code,
+            language=data.language, is_final=data.is_final,
         )
-    )
-    interview = result.scalar_one_or_none()
-    if not interview:
-        raise HTTPException(status_code=404, detail="Interview not found")
+        await db.commit()
+    except (InterviewNotFoundError, ReportJobNotReadyError, DomainFinalSubmissionConflict) as exc:
+        raise _completion_error(exc) from exc
+    return {"status": "ok", "report_status": job.status if job else None}
 
-    interview.final_code = data.code
-    if data.language:
-        interview.coding_language = data.language
-    await db.commit()
 
-    return {"status": "ok"}
+@router.post("/{interview_id}/code-finalize")
+async def finalize_code_backup(
+    interview_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Explicit user action to submit the last server backup after a lost draft."""
+    user_id = current_user.id
+    try:
+        await finalize_saved_code(db, interview_id, user_id=user_id)
+        await db.commit()
+        return await get_report_progress(db, interview_id, user_id=user_id)
+    except (InterviewNotFoundError, ReportJobNotReadyError, DomainFinalSubmissionConflict) as exc:
+        raise _completion_error(exc) from exc
 
 
 @router.get("/{interview_id}/status")
@@ -488,8 +512,21 @@ async def start_interview(
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
 
-    if interview.status == "completed":
+    if interview.status in ("completed", "evaluated", "incomplete", "failed"):
         raise HTTPException(status_code=400, detail="Interview already completed")
+
+    if interview.status == "in_progress":
+        # Rejoining must not stop the current bot and start another one on the
+        # same interview ID: its old callback could freeze the wrong transcript.
+        if not interview.daily_room_url:
+            raise HTTPException(status_code=409, detail="Interview connection is still being prepared")
+        room_url = interview.daily_room_url
+        await db.commit()
+        try:
+            token = await get_daily_token(room_url.rstrip("/").rsplit("/", 1)[-1], is_owner=False)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Could not reconnect to the active interview") from exc
+        return {"room_url": room_url, "token": token, "status": "in_progress"}
 
     if interview.interview_mode == "coding":
         if not interview.coding_problem:
@@ -511,16 +548,6 @@ async def start_interview(
         await db.commit()
         await db.refresh(current_user)
         logger.info(f"Deducted 1 credit for user {current_user.id}, remaining: {current_user.credits_remaining}")
-
-    # Reset status so we can restart
-    if interview.status == "in_progress":
-        # Stop old bot if running
-        try:
-            await _stop_voice_agent(interview)
-        except Exception:
-            pass
-        interview.status = "planned"
-        await db.commit()
 
     # Create Daily room and get tokens
     try:
@@ -561,26 +588,21 @@ async def end_interview(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Stop the bot via voice agent server
-    result = await db.execute(
-        select(Interview).where(
-            Interview.id == interview_id,
-            Interview.user_id == current_user.id,
-        )
-    )
-    interview = result.scalar_one_or_none()
-    if not interview:
-        raise HTTPException(status_code=404, detail="Interview not found")
-
     try:
-        await _stop_voice_agent(interview)
-    except Exception:
-        pass
+        interview = await end_completed_interview(db, interview_id, user_id=current_user.id)
+        await db.commit()
+    except (InterviewNotFoundError, ReportJobNotReadyError) as exc:
+        raise _completion_error(exc) from exc
 
-    interview.status = "completed"
-    await db.commit()
-
-    return {"interview_id": interview.id, "status": "completed"}
+    # Release the transaction before stopping the bot: its callback may need the
+    # same interview row while this network request is still in progress.
+    status = interview.status
+    if status == "completed":
+        try:
+            await _stop_voice_agent(interview)
+        except Exception as exc:
+            logger.warning("Could not stop interview {} bot ({})", interview_id, type(exc).__name__)
+    return {"interview_id": interview_id, "status": status}
 
 
 @router.get("/{interview_id}/transcript")
@@ -602,240 +624,102 @@ async def get_transcript(
     return {"transcript": interview.transcript or []}
 
 
-def _check_coding_submission(final_code: str | None, coding_problem: dict | None, coding_language: str | None) -> dict:
-    """Check if the user wrote enough code beyond the starter template.
-
-    Returns {"sufficient": bool, "reason": str}.
-    """
-    if not final_code or not final_code.strip():
-        return {"sufficient": False, "reason": "No code was submitted."}
-
-    # Get the starter code for the user's language
-    starter_code = ""
-    if coding_problem and coding_language:
-        starter_code = (coding_problem.get("starter_code") or {}).get(coding_language, "")
-
-    # If final code is identical to starter code (ignoring whitespace)
-    if starter_code and final_code.strip() == starter_code.strip():
-        return {"sufficient": False, "reason": "Only the starter code was submitted — no changes were made."}
-
-    # Count new lines the user added (non-blank lines not in the starter)
-    starter_lines = set(line.strip() for line in starter_code.splitlines() if line.strip())
-    final_lines = [line for line in final_code.splitlines() if line.strip()]
-    new_lines = [line for line in final_lines if line.strip() not in starter_lines]
-
-    if len(new_lines) < 3:
-        return {
-            "sufficient": False,
-            "reason": f"Only {len(new_lines)} new line(s) of code written. Write at least 3 lines beyond the starter code.",
-        }
-
-    return {"sufficient": True, "reason": ""}
-
-
-async def _run_evaluation(interview_id: str):
-    """Run evaluation on a completed interview and save results to DB.
-
-    Splits DB access into two phases so the connection is NOT held during
-    the long Claude API call (which can take 30-60+ seconds).
-    """
-
-    # --- Phase 1: Read interview data, release connection quickly ---
-    async with async_session() as session:
-        result = await session.execute(
-            select(Interview).where(Interview.id == interview_id)
-        )
-        iv = result.scalar_one_or_none()
-        if not iv or not iv.transcript:
-            logger.warning(f"Cannot evaluate interview {interview_id}: no transcript")
-            return
-
-        # --- Coding mode: check code submission instead of spoken answers ---
-        if iv.interview_mode == "coding":
-            code_check = _check_coding_submission(iv.final_code, iv.coding_problem, iv.coding_language)
-            if not code_check["sufficient"]:
-                logger.warning(f"Skipping evaluation for coding interview {interview_id}: {code_check['reason']}")
-                iv.status = "incomplete"
-                iv.incomplete_reason = code_check["reason"]
-                await session.commit()
-                return
-        else:
-            # Voice mode: need at least 3 substantive user responses to evaluate
-            user_entries = [
-                e for e in iv.transcript
-                if e.get("role") == "user"
-                and len(e.get("text", "").strip().split()) >= 5
-            ]
-            if len(user_entries) < 3:
-                logger.warning(f"Skipping evaluation for {interview_id}: insufficient user responses ({len(user_entries)})")
-                iv.status = "incomplete"
-                await session.commit()
-                return
-
-        # Check if report already exists (avoid duplicate)
-        existing_report = await session.execute(
-            select(InterviewReport).where(InterviewReport.interview_id == interview_id)
-        )
-        if existing_report.scalar_one_or_none():
-            logger.info(f"Report already exists for interview {interview_id}, skipping")
-            return
-
-        # Extract data we need for evaluation before releasing the connection
-        interview_mode = iv.interview_mode
-        transcript = iv.transcript
-        interview_plan = iv.interview_plan or {}
-        coding_problem = iv.coding_problem or {}
-        final_code = iv.final_code
-        coding_language = iv.coding_language
-
-    # --- Phase 2: Call Claude API (no DB connection held) ---
-    if interview_mode == "coding":
-        evaluation = await evaluate_coding_interview(
-            transcript=transcript,
-            coding_problem=coding_problem,
-            final_code=final_code,
-            coding_language=coding_language,
-        )
-    else:
-        evaluation = await evaluate_interview(
-            transcript=transcript,
-            interview_plan=interview_plan,
-        )
-
-    # --- Phase 3: Save results with a fresh connection ---
-    async with async_session() as session:
-        # Re-check for duplicate (another task may have finished first)
-        existing_report = await session.execute(
-            select(InterviewReport).where(InterviewReport.interview_id == interview_id)
-        )
-        if existing_report.scalar_one_or_none():
-            logger.info(f"Report already exists for interview {interview_id}, skipping save")
-            return
-
-        # Save category scores
-        for cat_score in evaluation.get("category_scores", []):
-            score = InterviewScore(
-                interview_id=interview_id,
-                category=cat_score["category"],
-                score=cat_score["score"],
-                feedback=cat_score.get("feedback"),
-            )
-            session.add(score)
-
-        # Save report
-        report = InterviewReport(
-            interview_id=interview_id,
-            overall_score=evaluation["overall_score"],
-            strengths=evaluation.get("strengths", []),
-            weaknesses=evaluation.get("weaknesses", []),
-            detailed_feedback=evaluation.get("detailed_feedback", ""),
-            recommendations=evaluation.get("recommendations", []),
-            question_answers=evaluation.get("question_answers", []),
-            confidence_analysis=evaluation.get("confidence_analysis"),
-            skill_assessment=evaluation.get("skill_assessment"),
-            code_review=evaluation.get("code_review"),
-        )
-        session.add(report)
-
-        # Update interview status
-        iv_result = await session.execute(
-            select(Interview).where(Interview.id == interview_id)
-        )
-        iv = iv_result.scalar_one_or_none()
-        if iv:
-            iv.status = "evaluated"
-
-        await session.commit()
-        logger.info(f"Evaluation saved for interview {interview_id}, score: {evaluation['overall_score']}")
-
-
-async def _run_evaluation_safely(interview_id: str):
-    try:
-        await _run_evaluation(interview_id)
-    except Exception as eval_err:
-        logger.exception(f"Auto-evaluation failed for {interview_id}: {type(eval_err).__name__}: {eval_err}")
-
-
 @router.post("/{interview_id}/bot-callback")
 async def bot_callback(
     interview_id: str,
+    data: BotCallbackRequest,
     request: Request,
+    db: AsyncSession = Depends(get_db),
 ):
-    """Callback from the voice agent when the interview ends.
-
-    The voice agent sends the transcript here after the interview is complete.
-    Authenticated via a shared secret (Daily API key) to prevent unauthorized calls.
-    """
-    # Verify the request is from our voice agent
-    bot_secret = request.headers.get("X-Bot-Secret", "")
-    if bot_secret != settings.daily_api_key:
+    """Save the voice transcript and its report job in one transaction."""
+    secret = request.headers.get("X-Bot-Secret", "")
+    if not settings.daily_api_key or not hmac.compare_digest(secret, settings.daily_api_key):
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-    body = await request.json()
-    transcript = body.get("transcript", [])
-    callback_status = body.get("status")
-    error = body.get("error")
-
-    async with async_session() as session:
-        result = await session.execute(
-            select(Interview).where(Interview.id == interview_id)
+    try:
+        job = await complete_from_callback(
+            db, interview_id,
+            transcript=[entry.model_dump() for entry in data.transcript], status=data.status,
         )
-        iv = result.scalar_one_or_none()
-        if not iv:
-            raise HTTPException(status_code=404, detail="Interview not found")
-
-        iv.transcript = transcript
-        iv.status = "failed" if callback_status == "failed" and not transcript else "completed"
-        await session.commit()
-        logger.info(f"Bot callback: interview {interview_id} completed with {len(transcript)} entries")
-
-    # Run evaluation after a short delay so the frontend's final code-sync
-    # can complete before we read final_code from the database.
-    if transcript:
-        async def _delayed_evaluation(iid: str):
-            await asyncio.sleep(5)  # wait for frontend final code-sync to commit
-            await _run_evaluation_safely(iid)
-        asyncio.create_task(_delayed_evaluation(interview_id))
-    elif error:
-        logger.warning(f"Bot callback for {interview_id} had no transcript: {error}")
-
-    return {"status": "ok"}
+        await db.commit()
+    except (InterviewNotFoundError, ReportJobNotReadyError) as exc:
+        raise _completion_error(exc) from exc
+    return {"status": "ok", "report_status": job.status if job else None}
 
 
-@router.post("/{interview_id}/evaluate")
+@router.post("/{interview_id}/evaluate", status_code=202)
 async def trigger_evaluation(
     interview_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Manually trigger evaluation for a completed interview."""
-    result = await db.execute(
-        select(Interview).where(
-            Interview.id == interview_id,
-            Interview.user_id == current_user.id,
-        )
-    )
-    interview = result.scalar_one_or_none()
-    if not interview:
-        raise HTTPException(status_code=404, detail="Interview not found")
-
-    if not interview.transcript:
-        raise HTTPException(status_code=400, detail="No transcript available yet")
-
-    # Check if report already exists
-    existing = await db.execute(
-        select(InterviewReport).where(InterviewReport.interview_id == interview_id)
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Report already exists")
-
+    """Idempotently enqueue evaluation; the worker performs the AI request."""
+    user_id = current_user.id
     try:
-        await _run_evaluation(interview_id)
-    except Exception as e:
-        logger.error(f"Evaluation failed for {interview_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
+        await request_report(db, interview_id, user_id=user_id)
+        await db.commit()
+        progress = await get_report_progress(db, interview_id, user_id=user_id)
+    except (InterviewNotFoundError, ReportJobNotReadyError) as exc:
+        raise _completion_error(exc) from exc
+    return {"interview_id": interview_id, **progress}
 
-    return {"interview_id": interview_id, "status": "evaluated"}
+
+async def _report_event_stream(request, hub, interview_id: str, user_id: str):
+    deadline = time.monotonic() + 300
+    previous = None
+    # Subscribe BEFORE reading the snapshot, so a commit between subscribing and
+    # reading cannot be missed. Reconnects always re-read durable current state.
+    with hub.watch(interview_id) as changed:
+        while time.monotonic() < deadline:
+            changed.clear()
+            try:
+                async with async_session() as session:
+                    progress = await get_report_progress(session, interview_id, user_id=user_id)
+            except InterviewNotFoundError:
+                yield 'event: report_status\ndata: {"status":"failed","message":"Interview is no longer available."}\n\n'
+                return
+            except Exception as exc:
+                logger.warning("Report stream interrupted for {} ({})", interview_id, type(exc).__name__)
+                return  # Client reconnects and re-reads persisted progress.
+            payload = json.dumps(progress, separators=(",", ":"))
+            if payload != previous:
+                yield f"event: report_status\ndata: {payload}\n\n"
+                previous = payload
+            if progress["status"] in ("ready", "failed", "incomplete"):
+                return
+            while not changed.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or await request.is_disconnected():
+                    return
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=min(15, remaining))
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+
+
+@router.get("/{interview_id}/report/events")
+async def report_events(
+    interview_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Authenticated report updates; report contents are fetched when ready."""
+    user_id = current_user.id
+    try:
+        await get_report_progress(db, interview_id, user_id=user_id)
+    except InterviewNotFoundError as exc:
+        raise _completion_error(exc) from exc
+    # Auth and ownership checks share the dependency session. Return its pooled
+    # connection before opening a stream that can remain connected for minutes.
+    await db.close()
+    hub = getattr(request.app.state, "report_notifications", None)
+    if hub is None:
+        raise HTTPException(status_code=503, detail="Report notifications are temporarily unavailable")
+    return StreamingResponse(
+        _report_event_stream(request, hub, interview_id, user_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{interview_id}/report")
@@ -855,25 +739,22 @@ async def get_report(
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
 
-    # Check if interview was too short to evaluate
-    if interview.status == "incomplete":
-        if interview.interview_mode == "coding":
-            reason = interview.incomplete_reason or "Not enough code was written."
-            message = f"Unable to generate a report. {reason} Please write at least 3 lines of code beyond the starter template to receive feedback."
-        else:
-            message = "Interview was too short to generate a report. You need to answer at least a few questions for the AI to evaluate your performance."
-        return {
-            "status": "incomplete",
-            "message": message,
-        }
-
     # Get report
     report_result = await db.execute(
         select(InterviewReport).where(InterviewReport.interview_id == interview_id)
     )
     report = report_result.scalar_one_or_none()
     if not report:
-        return {"status": "pending", "message": "Report is being generated..."}
+        progress = await get_report_progress(db, interview_id, user_id=current_user.id)
+        if progress["status"] != "ready":
+            return progress
+        # The worker may have committed between the first report lookup and the
+        # progress lookup. A ready HTTP response must always include the report.
+        report = await db.scalar(select(InterviewReport).where(
+            InterviewReport.interview_id == interview_id,
+        ))
+        if report is None:
+            return {"status": "generating", "message": "The report is being prepared for download."}
 
     # Get scores
     scores_result = await db.execute(

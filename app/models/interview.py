@@ -23,6 +23,7 @@ class Interview(Base):
     coding_language: Mapped[str | None] = mapped_column(String, nullable=True)  # "python", "javascript", "java", "cpp", "go"
     coding_problem: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # generated problem: statement, examples, constraints, hints, optimal solution
     final_code: Mapped[str | None] = mapped_column(Text, nullable=True)  # user's final submitted code
+    code_finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     interview_plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     transcript: Mapped[list | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String, default="setup")  # setup, planned, in_progress, completed
@@ -36,6 +37,10 @@ class Interview(Base):
     questions: Mapped[list["InterviewQuestion"]] = relationship(back_populates="interview")
     scores: Mapped[list["InterviewScore"]] = relationship(back_populates="interview")
     report: Mapped["InterviewReport | None"] = relationship(back_populates="interview", uselist=False)
+    report_job: Mapped["ReportJob | None"] = relationship(
+        back_populates="interview", uselist=False,
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
 
 
 class InterviewQuestion(Base):
